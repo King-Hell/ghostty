@@ -22,6 +22,16 @@ class GlobalEventTap {
     // don't have permissions.
     private var enableTimer: Timer?
 
+    // A long-running watchdog that periodically checks whether the tap is
+    // still enabled and re-enables it if not. macOS *should* notify us via
+    // `.tapDisabledByTimeout` / `.tapDisabledByUserInput` when it disables
+    // the tap, but the tap can silently stop receiving events without any
+    // notification at all.
+    private var watchdogTimer: Timer?
+
+    // How often we poll the tap's enabled state.
+    private static let watchdogInterval: TimeInterval = 5
+
     // Private init so it can't be constructed outside of our singleton
     private init() {}
 
@@ -62,6 +72,12 @@ class GlobalEventTap {
         if let enableTimer {
             enableTimer.invalidate()
             self.enableTimer = nil
+        }
+
+        // Stop the watchdog so it doesn't try to re-enable a tap we just killed
+        if let watchdogTimer {
+            watchdogTimer.invalidate()
+            self.watchdogTimer = nil
         }
 
         // Stop our event tap
@@ -112,8 +128,48 @@ class GlobalEventTap {
             .commonModes
         )
 
+        // Start the watchdog. See `watchdogTimer` for why.
+        startWatchdog()
+
         Self.logger.info("global event tap enabled for global keybinds")
         return true
+    }
+
+    // Polls `CGEvent.tapIsEnabled` periodically and revives the tap if macOS
+    // disabled it without delivering a `.tapDisabledByTimeout` /
+    // `.tapDisabledByUserInput` callback. If `tapEnable` doesn't
+    // bring it back, the mach port itself is likely dead and we reinstall.
+    private func startWatchdog() {
+        watchdogTimer?.invalidate()
+        watchdogTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.watchdogInterval,
+            repeats: true
+        ) { [weak self] _ in
+            guard let self, let machPort = self.eventTap else { return }
+            guard !CGEvent.tapIsEnabled(tap: machPort) else { return }
+
+            Self.logger.warning("global event tap silently disabled, re-enabling")
+            CGEvent.tapEnable(tap: machPort, enable: true)
+
+            // If a simple re-enable doesn't take, the mach port is probably
+            // unrecoverable. Tear it down and create a fresh one.
+            if !CGEvent.tapIsEnabled(tap: machPort) {
+                self.reinstallEventTap()
+            }
+        }
+    }
+
+    // Invalidate the current tap mach port and create a new one. Safe to call
+    // from within the watchdog's own callback — `tryEnable` will start a new
+    // watchdog timer, which implicitly invalidates the one currently firing
+    // (its callback finishes normally; it just won't fire again).
+    private func reinstallEventTap() {
+        if let eventTap {
+            Self.logger.warning("event tap port unrecoverable, reinstalling")
+            CFMachPortInvalidate(eventTap)
+            self.eventTap = nil
+        }
+        _ = tryEnable()
     }
 }
 
