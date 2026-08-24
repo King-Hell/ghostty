@@ -123,22 +123,31 @@ jobs:
       # only (-Dxcframework-target=native), while the Xcode project defaults
       # to a universal (arm64 + x86_64) app. Restrict the app to arm64 so
       # linking succeeds and we get a leaner darwin-arm64-only artifact.
+      #
+      # -configuration ReleaseLocal: the project's configuration for local,
+      # certificate-less builds. It ad-hoc signs (CODE_SIGN_IDENTITY "-")
+      # and uses GhosttyReleaseLocal.entitlements, which includes
+      # com.apple.security.cs.disable-library-validation. Without it, dyld
+      # refuses to load Sparkle.framework (signed by the Sparkle project's
+      # Team ID) from an ad-hoc signed hardened-runtime process, and the
+      # app fails to launch. The plain "Release" configuration expects a
+      # real Developer ID certificate (used by the official release flow).
       - name: Build Ghostty.app
         run: |
           cd macos
-          xcodebuild -target Ghostty -configuration Release \
+          xcodebuild -target Ghostty -configuration ReleaseLocal \
             ARCHS=arm64
 
       - name: Verify artifact
         run: |
-          test -d macos/build/Release/Ghostty.app
-          file macos/build/Release/Ghostty.app/Contents/MacOS/*
-          codesign -dv --verbose=2 macos/build/Release/Ghostty.app || true
+          test -d macos/build/ReleaseLocal/Ghostty.app
+          file macos/build/ReleaseLocal/Ghostty.app/Contents/MacOS/*
+          codesign -dv --verbose=2 macos/build/ReleaseLocal/Ghostty.app || true
 
       # ditto preserves symlinks/metadata better than zip.
       - name: Package app
         run: |
-          cd macos/build/Release
+          cd macos/build/ReleaseLocal
           ditto -c -k --keepParent Ghostty.app "$GITHUB_WORKSPACE/ghostty-macos-arm64.zip"
 
       - name: Upload artifact
