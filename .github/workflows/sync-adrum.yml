@@ -1,0 +1,79 @@
+# Watches adrum/ghostty's feat/quickterm-with-tab branch. When it moves,
+# this workflow:
+#   1. force-updates our feat/quickterm-with-tab branch to match it
+#   2. immediately builds the new commit via the reusable macOS workflow
+#
+# Why it's a single workflow instead of "push then let the push trigger
+# fire": pushes made with GITHUB_TOKEN do NOT trigger other workflows
+# (GitHub's recursion protection), so the build must be invoked directly
+# via workflow_call.
+#
+# NOTE: scheduled workflows only run from the DEFAULT branch. Make sure
+# this file (and build-macos-arm64.yml, which is called via `uses:`) is
+# merged into your fork's default branch (main).
+
+name: Sync & build adrum branch
+
+on:
+  schedule:
+    # Once a day at 08:00 UTC. GitHub may delay cron runs during busy
+    # periods. Adjust the time to taste; use workflow_dispatch for an
+    # immediate manual run.
+    - cron: "0 8 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    name: Sync adrum/ghostty branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+      sha: ${{ steps.sync.outputs.sha }}
+    steps:
+      - id: sync
+        name: Sync upstream branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REPO: https://github.com/adrum/ghostty.git
+          UPSTREAM_BRANCH: feat/quickterm-with-tab
+          LOCAL_BRANCH: feat/quickterm-with-tab
+        run: |
+          set -euo pipefail
+          mkdir sync && cd sync
+          git init -q
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch -q upstream "$UPSTREAM_BRANCH"
+          up_sha=$(git rev-parse FETCH_HEAD)
+
+          git remote add origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          local_sha=""
+          if git fetch -q --depth=1 origin "$LOCAL_BRANCH"; then
+            local_sha=$(git rev-parse FETCH_HEAD)
+          fi
+
+          echo "upstream: $up_sha"
+          echo "local:    $local_sha"
+          if [ "$up_sha" = "$local_sha" ]; then
+            echo "No new commits upstream, nothing to do."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git push -q --force origin "$up_sha:refs/heads/$LOCAL_BRANCH"
+          echo "Updated $LOCAL_BRANCH to $up_sha"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$up_sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build new commit (darwin arm64)
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    # The reusable workflow file must exist on the default branch.
+    uses: ./.github/workflows/build-macos-arm64.yml
+    with:
+      ref: ${{ needs.sync.outputs.sha }}
+    permissions:
+      contents: read

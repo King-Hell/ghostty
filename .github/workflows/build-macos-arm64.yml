@@ -1,0 +1,136 @@
+# Builds Ghostty.app for macOS arm64 (Apple Silicon) on GitHub-hosted
+# runners. Modeled after the official `build-macos` / release-tip jobs in
+# test.yml and release-tip.yml, adapted for a fork without Namespace
+# runners or signing secrets:
+#
+#   - Runner: macos-26 (Apple Silicon, Tahoe, Xcode 26.6 by default)
+#   - Nix provides the pinned Zig toolchain and all Zig dependencies
+#   - Zig builds GhosttyKit.framework
+#   - xcodebuild builds the native app (ad-hoc signed, CODE_SIGN_IDENTITY "-")
+#   - The unsigned/ad-hoc signed app is uploaded as an artifact
+
+name: Build macOS (arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref (branch/tag/SHA) to check out and build. Defaults to the triggering SHA."
+        type: string
+        required: false
+        default: ""
+  push:
+    branches:
+      - main
+      - "feat/**"
+  pull_request: {}
+  # Allow the sync-adrum workflow (and anything else) to call this
+  # workflow and build an arbitrary ref.
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref (branch/tag/SHA) to check out and build. Defaults to the triggering SHA."
+        type: string
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name != 'main' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos-arm64:
+    name: Ghostty.app (darwin arm64)
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      ZIG_LOCAL_CACHE_DIR: /Users/runner/zig/local-cache
+      ZIG_GLOBAL_CACHE_DIR: /Users/runner/zig/global-cache
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so version/build-number derivation from git works.
+          fetch-depth: 0
+          ref: ${{ inputs.ref || github.sha }}
+
+      # Install Nix; the flake pins the exact Zig compiler and toolchain.
+      # (Determinate installer matches the official workflows; plain
+      # cachix/install-nix-action fails on recent macOS, see
+      # https://github.com/NixOS/nix/issues/13342)
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          determinate: true
+
+      # Pull-only access to the public ghostty binary cache (no authToken
+      # needed on forks).
+      - uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        with:
+          name: ghostty
+
+      # Cache the Zig package cache between runs to speed up GhosttyKit
+      # builds. (The official repo uses namespacelabs/nscloud-cache-action,
+      # which only works on Namespace runners.)
+      - name: Setup Zig cache
+        uses: actions/cache@v4
+        with:
+          path: /Users/runner/zig
+          key: zig-macos-arm64-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-macos-arm64-
+
+      # Same Xcode the official CI pins; it is the default on macos-26
+      # runners, but select it explicitly.
+      - name: Xcode Select
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app
+
+      - name: Xcode Version
+        run: xcodebuild -version
+
+      # Fetch all Zig dependencies into the Nix store and remember the path.
+      - name: Get the Zig deps
+        id: deps
+        run: nix build -L .#deps && echo "deps=$(readlink ./result)" >> "$GITHUB_OUTPUT"
+
+      # GhosttyKit is the framework that is built from Zig for our native
+      # Mac app to access. Build it in release mode.
+      #
+      # -Dxcframework-target=native: the default (universal) also builds an
+      # x86_64 slice of the Zig library. Since this runner is arm64 and we
+      # only ship a darwin arm64 app, build only the native architecture to
+      # roughly halve Zig compilation time.
+      - name: Build GhosttyKit
+        run: |
+          nix develop -c zig build \
+            --system ${{ steps.deps.outputs.deps }} \
+            -Doptimize=ReleaseFast \
+            -Dxcframework-target=native \
+            -Demit-macos-app=false
+
+      # The native app is built with native Xcode tooling. This also does
+      # codesigning (ad-hoc, per the project settings). IMPORTANT: this must
+      # NOT run in a Nix environment. Nix breaks xcodebuild so this has to
+      # be run outside.
+      - name: Build Ghostty.app
+        run: |
+          cd macos
+          xcodebuild -target Ghostty -configuration Release
+
+      - name: Verify artifact
+        run: |
+          test -d macos/build/Release/Ghostty.app
+          file macos/build/Release/Ghostty.app/Contents/MacOS/*
+          codesign -dv --verbose=2 macos/build/Release/Ghostty.app || true
+
+      # ditto preserves symlinks/metadata better than zip.
+      - name: Package app
+        run: |
+          cd macos/build/Release
+          ditto -c -k --keepParent Ghostty.app "$GITHUB_WORKSPACE/ghostty-macos-arm64.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ghostty-macos-arm64-${{ github.sha }}
+          path: ghostty-macos-arm64.zip
+          if-no-files-found: error
