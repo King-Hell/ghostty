@@ -111,10 +111,16 @@ jobs:
       # codesigning (ad-hoc, per the project settings). IMPORTANT: this must
       # NOT run in a Nix environment. Nix breaks xcodebuild so this has to
       # be run outside.
+      #
+      # ARCHS=arm64: GhosttyKit above was built for the native architecture
+      # only (-Dxcframework-target=native), while the Xcode project defaults
+      # to a universal (arm64 + x86_64) app. Restrict the app to arm64 so
+      # linking succeeds and we get a leaner darwin-arm64-only artifact.
       - name: Build Ghostty.app
         run: |
           cd macos
-          xcodebuild -target Ghostty -configuration Release
+          xcodebuild -target Ghostty -configuration Release \
+            ARCHS=arm64
 
       - name: Verify artifact
         run: |
