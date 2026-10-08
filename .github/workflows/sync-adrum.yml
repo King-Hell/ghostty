@@ -28,7 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      workflows: write
     outputs:
       changed: ${{ steps.sync.outputs.changed }}
       sha: ${{ steps.sync.outputs.sha }}
