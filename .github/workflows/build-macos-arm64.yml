@@ -18,7 +18,7 @@ on:
         description: "Git ref (branch/tag/SHA) to check out and build. Defaults to the triggering SHA."
         type: string
         required: false
-        default: ""
+        default: "feat/quickterm-with-tab"
   push:
     branches:
       - main
